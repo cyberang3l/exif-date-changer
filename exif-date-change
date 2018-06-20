@@ -1,0 +1,251 @@
+#!/usr/bin/env bash
+#
+# Simple and intuitive bash script that uses exiftool to modify exif
+# dates. You would want to use it typically when you took some pictures
+# and later on you realized that you hadn't configured the clock of your
+# camera properly.
+#
+# --------------------------------------------------------------------
+#
+#  Copyright (C) 2018 Vangelis Tasoulas <cyberang3l@gmail.com>
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# --------------------------------------------------------------------
+
+which_bin_or_exit () {
+	bin="${1}"
+	>/dev/null which "${bin}" 2>&1
+	if [[ $? -ne 0 ]] ; then
+		echo "Could not find binary '${bin}' in your \$PATH."
+		echo "Please install (or make it available in \$PATH) ${bin} and try again."
+		exit 1
+	fi
+}
+
+which_bin_or_exit exiftool
+
+usage () {
+	echo ""
+	echo "$(basename $0) [OPTION]... [IMAGE]..."
+	echo ""
+	echo "Shifts the Exif date from a list of images."
+	echo "Uses the exiftool to achieve that goal."
+	echo ""
+	echo "Options:"
+	echo "  -h, --help             Shows this help message"
+	echo "  -d, --dry-run          Shows the time changes for all provided IMAGES without"
+	echo "                          applying any changes. Use this for testing."
+	echo ""
+	echo "  -r R_EXIF_TIME_TAG, --reference-exif-tag R_EXIF_TIME_TAG"
+	echo "                         The R_EXIF_TIME_TAG is a valid time tag that can be extracted"
+	echo "                          from the photograph with the exiftool. The R_EXIF_TIME_TAG"
+	echo "                          is used as a reference when adding/subtracting the STIME."
+	echo "                          Tags that will work (unless they have been stripped) are:"
+	echo "                             DateTimeOriginal, CreateDate, ModifyDate,"
+	echo "                             FileAccessDate, FileModifyDate, FileInodeChangeDate"
+	echo ""
+	echo "                          Default value: DateTimeOriginal"
+	echo ""
+	echo "  -s STIME, --shift-time STIME"
+	echo "                         The STIME defines the time shift that will be applied to the"
+	echo "                          IMAGES. The format is human readable and must be parsable"
+	echo "                          by the date command. Some examples:"
+	echo "                           1. The leading minus (-) in the following example indicates"
+	echo "                              that the time described in the human readable format will"
+	echo "                              be subtracted from the DateTimeOriginal Exif info."
+	echo "                               \"-1 year -2 months -13 days -1 hour +15 minutes +3 seconds\""
+	echo "                           2. The following example will add 383 days and subtract 3846 seconds."
+	echo "                               \"+383 days -3846 seconds\""
+	echo ""
+	echo "  -m, --update-system-modify-time"
+	echo "                         If the -m flag is used, the file system modify time will also"
+	echo "                          be updated."
+	echo "  -f, --force-delete-backups"
+	echo "                         Exiftool takes a backup of an image whenever a modification is"
+	echo "                          happening. At the end of the execution of this script you are"
+	echo "                          asked if you want to keep these backed up images or delete them."
+	echo "                          When using the -f flag, the script will force delete the backups"
+	echo "                          at the end."
+}
+
+IMAGES=()
+while [[ $# -gt 0 ]] ; do
+	arg="${1}"
+	case "${arg}" in
+		-h|--help)
+			h=1
+			break
+			;;
+		-d|--dry-run)
+			d=1
+			shift
+			;;
+		-m|--update-system-modify-time)
+			m=1
+			shift
+			;;
+		-f|--force-delete-backups)
+			f=1
+			shift
+			;;
+		-s|--shift-time-str)
+			STIME="${2}"
+			shift 2
+			;;
+		-r|--reference-exif-tag)
+			R_EXIF_TIME_TAG="${2}"
+			if [[ \
+				$R_EXIF_TIME_TAG != DateTimeOriginal && \
+				$R_EXIF_TIME_TAG != CreateDate && \
+				$R_EXIF_TIME_TAG != ModifyDate && \
+				$R_EXIF_TIME_TAG != FileAccessDate && \
+				$R_EXIF_TIME_TAG != FileModifyDate && \
+				$R_EXIF_TIME_TAG != FileInodeChangeDate \
+				]] ; then
+				echo "Not a valid R_EXIF_TIME_TAG"
+				echo "  Valid values are:"
+				echo "      DateTimeOriginal, CreateDate, ModifyDate,"
+				echo "      FileAccessDate, FileModifyDate, FileInodeChangeDate"
+				exit 1
+			fi
+			shift 2
+			;;
+		--)
+			if [[ -z $after_double_dash ]] ; then
+				after_double_dash=1
+			else
+				IMAGES+=("${arg}")
+			fi
+			shift
+			;;
+		-*)
+			if [[ -z $after_double_dash ]] ; then
+				echo "Error: Unknown argument ${arg}"
+				exit 1
+			else
+				IMAGES+=("${arg}")
+			fi
+			shift
+			;;
+		*)
+			IMAGES+=("${arg}")
+			shift
+			;;
+	esac
+done
+
+if [[ ! -z $h ]] ; then
+	usage
+	exit 0
+fi
+
+if [[ ${#IMAGES[@]} -eq 0 ]] ; then
+	echo "No images provided as positional arguments."
+	echo "Nothing to be done here..."
+	exit 1
+fi
+
+date_from_exiftool_fmt () {
+	exif_date_tag="${1}"
+	image="${2}"
+	exif_date=$(exiftool -${exif_date_tag} "${image}" | awk -F' : ' '{print $2}')
+	if [[ -z $exif_date ]] ; then
+		return 1
+	fi
+	echo "${exif_date}" | sed -r 's/(....).(..).(..) (.*)/\1\/\2\/\3 \4/'
+}
+
+date_to_exiftool_fmt () {
+	exif_time_fmt="%Y:%m:%d %H:%M:%S"
+	date -d "${1}" +"${exif_time_fmt}"
+}
+
+change_fs_modify_date () {
+	date_orig="${1}"
+	image="${2}"
+	date_touch_fmt=$(date -d "${date_orig}" +"%Y%m%d%H%M.%S")
+	touch -t ${date_touch_fmt} -m "${image}"
+}
+
+if [[ -z $R_EXIF_TIME_TAG ]] ; then
+	# Set default value for R_EXIF_TIME_TAG
+	R_EXIF_TIME_TAG="DateTimeOriginal"
+fi
+
+if [[ ! -z $STIME ]] ; then
+	# Validate the STIME
+	>/dev/null date -d "${STIME}" 2>&1
+	if [[ $? -ne 0 ]] ; then
+		echo "Invalid STIME. Please ensure that the provided STIME can be parsed"
+		echo "by the 'date -d' command".
+		exit 1
+	fi
+else
+	STIME="+0 seconds"
+fi
+
+
+parseble_time_fmt="%Y/%m/%d %H:%M:%S"
+print_time_fmt="%Y-%m-%d_%H-%M-%S"
+changed_images=()
+# Parse the images
+for image in "${IMAGES[@]}" ; do
+	orig_img_date="$(date_from_exiftool_fmt ${R_EXIF_TIME_TAG} "${image}")"
+	if [[ $? -ne 0 ]] ; then
+		echo "It seems that some of your images do not have a '${R_EXIF_TIME_TAG}' Exif image tag."
+		echo "Aborting on ${image}..."
+		exit 1
+	fi
+
+	dest_img_date=$(date -d "${STIME} ${orig_img_date}" +"${parseble_time_fmt}")
+
+	info_orig_date="$(date -d "${orig_img_date}" +"${print_time_fmt}")"
+	info_dest_date="$(date -d "${dest_img_date}" +"${print_time_fmt}")"
+	echo "Processing '${image}'"
+	echo "  Current image date: ${info_orig_date}"
+	echo "      New image date: ${info_dest_date}"
+
+	if [[ -z $d ]] ; then
+		# No dry run has been specified, so do the actual work here
+		#
+		# Convert the dest to the exif format in order to update the exif tags
+		dest_exif_img_date=$(date_to_exiftool_fmt "${dest_img_date}")
+		exiftool -AllDates="${dest_exif_img_date}" "${image}"
+
+		# Update the file-system modify date if the m flag is used
+		if [[ ! -z $m ]] ; then
+			change_fs_modify_date "${dest_img_date}" "${image}"
+		fi
+
+		if [[ "${info_orig_date}" != "${info_dest_date}" ]] ; then
+    		if [[ -z $f ]] ; then
+				changed_images+=( "${image}_original" )
+			else
+				rm -f "${image}_original"
+			fi
+		fi
+
+	fi
+	echo ""
+done
+
+if [[ -z $f && ${#changed_images[@]} -gt 0 ]] ; then
+	read -r -p 'Do you want to delete the original pictures that have been backed up? (N/y): ' answer
+	if [[ "${answer,,}" == "y" ]] ; then
+		for backup_img in "${changed_images[@]}" ; do
+			rm -f "${backup_img}"
+		done
+	fi
+fi
