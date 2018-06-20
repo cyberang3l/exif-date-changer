@@ -8,7 +8,7 @@ $ exif-date-change -h
 exif-date-change [OPTION]... [IMAGE]...
 
 Shifts the Exif date from a list of images.
-Uses the exiftool to achive that.
+Uses the exiftool to achieve that goal.
 
 Options:
   -h, --help             Shows this help message
